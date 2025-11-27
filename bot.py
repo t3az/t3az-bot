@@ -32,16 +32,28 @@ def is_super_admin():
     return commands.check(predicate)
 
 
-# VERİ YÖNETİMİ ----------------------------------------------------------
+# ---------------------- VERİ YÖNETİMİ ----------------------
 
 def load_data():
+    """data.json'u oku, eksik alanları tamamla."""
     if not os.path.exists(DATA_FILE):
         return {"users": {}, "codes": [], "banned": {}}
+
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
+            data = json.load(f)
+    except json.JSONDecodeError:
         return {"users": {}, "codes": [], "banned": {}}
+
+    # Eski dosyalarda banned alanı yoksa ekle
+    if "users" not in data:
+        data["users"] = {}
+    if "codes" not in data:
+        data["codes"] = []
+    if "banned" not in data:
+        data["banned"] = {}
+
+    return data
 
 
 def save_data(data):
@@ -49,7 +61,7 @@ def save_data(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-# LOG SİSTEMİ ------------------------------------------------------------
+# ------------------------ LOG SİSTEMİ -----------------------
 
 async def log_action(message: str):
     if LOG_CHANNEL_ID == 0:
@@ -62,14 +74,41 @@ async def log_action(message: str):
             pass
 
 
-# BOT HAZIR ---------------------------------------------------------------
+# ------------------------- HELPERLAR ------------------------
+
+def is_verified(discord_id: int) -> bool:
+    data = load_data()
+    user = data["users"].get(str(discord_id))
+    return bool(user and user.get("verified"))
+
+
+def get_or_assign_code(discord_id: int) -> str | None:
+    data = load_data()
+    uid = str(discord_id)
+
+    if uid not in data["users"]:
+        data["users"][uid] = {}
+
+    if "code" in data["users"][uid]:
+        return data["users"][uid]["code"]
+
+    if not data["codes"]:
+        return None
+
+    code = data["codes"].pop(0)
+    data["users"][uid]["code"] = code
+    save_data(data)
+    return code
+
+
+# -------------------------- EVENT ---------------------------
 
 @bot.event
 async def on_ready():
     print(f"Bot olarak giriş yapıldı: {bot.user}")
 
 
-# ADMIN KOMUTLARI ---------------------------------------------------------
+# ---------------------- ADMIN KOMUTLARI ---------------------
 
 @bot.command(name="kod-ekle")
 @is_super_admin()
@@ -78,7 +117,7 @@ async def kod_ekle(ctx, *, kodlar: str):
     yeni = kodlar.split()
     data["codes"].extend(yeni)
     save_data(data)
-    await ctx.send(f"✅ {len(yeni)} kod eklendi.")
+    await ctx.send(f"✅ {len(yeni)} kod eklendi. Toplam: {len(data['codes'])}")
     await log_action(f"🟢 {ctx.author.mention} {len(yeni)} kod ekledi.")
 
 
@@ -98,7 +137,6 @@ async def kod_liste(ctx):
         await ctx.send("📭 Kod yok.")
         return
 
-    # Limit aşmaması için parça parça gönder
     chunk = ""
     for code in codes:
         line = f"- {code}\n"
@@ -134,41 +172,49 @@ async def kod_temizle(ctx):
     await ctx.send(f"🧹 Tüm kodlar silindi ({adet}).")
 
 
-# ------------------------- 💀 BAN SİSTEMİ ------------------------------------
+# ---------------------- BAN / UNBAN -------------------------
 
 @bot.command(name="ban")
 @is_super_admin()
 async def ban_user(ctx, member: discord.Member = None):
+    """
+    Kullanıcıyı sunucudan atmadan tamamen görünmez ve yazamaz hale getirir.
+    Rolleri kaydedilir, alınır; Banned rolü verilir; tüm özel izinleri temizlenir.
+    """
     if member is None:
-        await ctx.send("❌ Kullanıcı etiketle: `!ban @kullanıcı`")
+        await ctx.send("❌ Lütfen bir kullanıcı etiketle: `!ban @kullanıcı`")
         return
 
     guild = ctx.guild
     data = load_data()
+    data.setdefault("banned", {})
 
-    # 1) Kullanıcının eski rollerini kaydet
+    # Kendini veya diğer adminleri banlamaya çalışıyorsan engellemek istersen buraya kontrol eklenebilir.
+
+    # 1) Eski rollerini kaydet
     old_roles = [role.id for role in member.roles if role != guild.default_role]
     data["banned"][str(member.id)] = old_roles
     save_data(data)
 
     # 2) Tüm rollerini kaldır
     roles_to_remove = [r for r in member.roles if r != guild.default_role]
-    try:
-        await member.remove_roles(*roles_to_remove, reason="Ban sistemi: roller alındı")
-    except Exception as e:
-        await ctx.send(f"❌ Roller alınamadı: {e}")
-        return
+    if roles_to_remove:
+        try:
+            await member.remove_roles(*roles_to_remove, reason="Ban: roller alındı")
+        except Exception as e:
+            await ctx.send(f"❌ Roller alınırken hata: {e}")
+            return
 
-    # 3) Banned rolü oluştur veya al
+    # 3) Banned rolünü oluştur / bul
     ban_role = discord.utils.get(guild.roles, name="Banned")
     if ban_role is None:
         ban_role = await guild.create_role(
             name="Banned",
             color=discord.Color.dark_gray(),
-            reason="Ban rolü oluşturuldu"
+            reason="Banned rolü oluşturuldu"
         )
 
-    # 4) Ban rolünü tüm sunucuya uygula
+    # 4) Banned rolü için tüm kanallarda izinleri ayarla
     for channel in guild.channels:
         try:
             await channel.set_permissions(
@@ -180,40 +226,44 @@ async def ban_user(ctx, member: discord.Member = None):
         except:
             pass
 
-    # 5) Kullanıcının özel izinlerini sıfırla
+    # 5) Üyenin tüm özel kanal izinlerini sıfırla
     for channel in guild.channels:
         try:
             await channel.set_permissions(member, overwrite=None)
         except:
             pass
 
-    # 6) Kullanıcıya banned rolü ver
+    # 6) Banned rolünü ver
     await member.add_roles(ban_role)
 
-    await ctx.send(f"🚫 {member.mention} tamamen banlandı.\n"
-                   f"- Tüm roller alındı\n"
-                   f"- Tüm kanallar gizlendi\n"
-                   f"- Mesaj yazamaz\n"
-                   f"- Özel izinleri silindi\n")
-
+    await ctx.send(
+        f"🚫 {member.mention} banlandı.\n"
+        f"- Tüm roller alındı\n"
+        f"- Tüm kanallar gizlendi\n"
+        f"- Mesaj yazamaz\n"
+        f"- Özel izinleri temizlendi"
+    )
     await log_action(f"🚫 {ctx.author.mention}, {member.mention} kullanıcısını banladı.")
 
-
-# ------------------------- 🔓 UNBAN SİSTEMİ ------------------------------------
 
 @bot.command(name="unban")
 @is_super_admin()
 async def unban_user(ctx, member: discord.Member = None):
+    """
+    Kullanıcının banını kaldırır, Banned rolünü alır, eski rollerini geri verir.
+    """
     if member is None:
-        await ctx.send("❌ Kullanıcı etiketle: `!unban @kullanıcı`")
+        await ctx.send("❌ Lütfen bir kullanıcı etiketle: `!unban @kullanıcı`")
         return
 
     guild = ctx.guild
     data = load_data()
+    data.setdefault("banned", {})
+
     ban_role = discord.utils.get(guild.roles, name="Banned")
 
     # 1) Banned rolünü kaldır
-    if ban_role in member.roles:
+    if ban_role and ban_role in member.roles:
         await member.remove_roles(ban_role)
 
     # 2) Özel izinlerini sıfırla
@@ -223,7 +273,7 @@ async def unban_user(ctx, member: discord.Member = None):
         except:
             pass
 
-    # 3) Eski rollerini geri yükle
+    # 3) Eski rollerini geri ver
     old_roles_ids = data["banned"].get(str(member.id), [])
     roles_to_give = []
     for role_id in old_roles_ids:
@@ -232,18 +282,21 @@ async def unban_user(ctx, member: discord.Member = None):
             roles_to_give.append(role)
 
     if roles_to_give:
-        await member.add_roles(*roles_to_give)
+        try:
+            await member.add_roles(*roles_to_give, reason="Unban: roller geri verildi")
+        except:
+            pass
 
-    # 4) Kaydı sil
+    # 4) Kayıt sil
     if str(member.id) in data["banned"]:
         del data["banned"][str(member.id)]
         save_data(data)
 
-    await ctx.send(f"✅ {member.mention} banı kaldırıldı ve eski roller geri verildi.")
-    await log_action(f"✅ {ctx.author.mention}, {member.mention} kullanıcısının banını kaldırdı.")
+    await ctx.send(f"✅ {member.mention} unbanlandı, eski roller geri verildi.")
+    await log_action(f"✅ {ctx.author.mention}, {member.mention} unban yaptı.")
 
 
-# ------------------------- NORMAL KOMUTLAR ------------------------------------
+# --------------------- NORMAL KULLANICI KOMUTLARI ----------------------
 
 @bot.command(name="kod-al")
 async def kod_al(ctx):
@@ -284,7 +337,6 @@ async def kod_durum(ctx):
     verified = "✅ Doğrulanmış" if is_verified(user_id) else "❌ Doğrulanmamış"
 
     msg = f"👤 {ctx.author.mention}\n• Doğrulama: {verified}\n"
-
     if user and "code" in user:
         msg += f"• Kodun: `{user['code']}`"
     else:
@@ -303,13 +355,13 @@ async def yardim(ctx):
         "`!kod-durum` → Kod durumunu gösterir\n"
         "\n"
         "__Admin Komutları:__\n"
-        "`!kod-ekle <kodlar>`\n"
+        "`!kod-ekle <kod1 kod2 ...>`\n"
         "`!kod-say`\n"
         "`!kod-liste`\n"
         "`!kod-sil <kod>`\n"
         "`!kod-temizle`\n"
-        "`!ban @kullanıcı` → Tüm roller alınır, gizli ban\n"
-        "`!unban @kullanıcı` → Roller geri verilir\n"
+        "`!ban @kullanıcı` → Gizli ban (roller alınır, kanal yok)\n"
+        "`!unban @kullanıcı` → Banı kaldır, roller geri gelsin\n"
     )
     await ctx.send(text)
 
