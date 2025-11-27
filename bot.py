@@ -15,6 +15,23 @@ bot = commands.Bot(command_prefix="!", intents=INTENTS)
 
 DATA_FILE = "data.json"
 
+# Sadece bu kullanıcılar "admin" komutlarını kullanabilsin
+ALLOWED_ADMIN_IDS = {
+    294866990110343168,
+    324895490237923340,  # İkinci kullanıcıyı eklemek istersen buraya ID yaz
+}
+
+
+def is_super_admin():
+    """Belirli ID'lere özel check."""
+    async def predicate(ctx):
+        if ctx.author.id in ALLOWED_ADMIN_IDS:
+            return True
+        await ctx.send("❌ Bu komutu kullanma yetkin yok.")
+        return False
+
+    return commands.check(predicate)
+
 
 def load_data():
     """data.json dosyasını her çağrıldığında diskteki SON halinden oku."""
@@ -67,9 +84,15 @@ async def on_ready():
     print(f"Bot olarak giriş yapıldı: {bot.user}")
 
 
+# --- ADMIN KOMUTLARI (Sadece ALLOWED_ADMIN_IDS kullanabilir) ---
+
 @bot.command(name="kod-ekle")
-@commands.has_permissions(administrator=True)
+@is_super_admin()
 async def kod_ekle(ctx, *, kodlar: str):
+    """
+    Örnek:
+    !kod-ekle KOD1 KOD2 KOD3
+    """
     data = load_data()
     yeni = kodlar.split()
     data["codes"].extend(yeni)
@@ -78,11 +101,76 @@ async def kod_ekle(ctx, *, kodlar: str):
 
 
 @bot.command(name="kod-say")
-@commands.has_permissions(administrator=True)
+@is_super_admin()
 async def kod_say(ctx):
     data = load_data()
     await ctx.send(f"📦 Kalan kod sayısı: {len(data['codes'])}")
 
+
+@bot.command(name="kod-liste")
+@is_super_admin()
+async def kod_liste(ctx):
+    """
+    Tüm mevcut kodları listeler.
+    """
+    data = load_data()
+    codes = data["codes"]
+
+    if not codes:
+        await ctx.send("📭 Kayıtlı kod yok.")
+        return
+
+    # Mesaj limiti için parçalı gönder (2000 karakter sınırı)
+    chunk = ""
+    header = "📃 Mevcut kodlar:\n"
+    for code in codes:
+        line = f"- {code}\n"
+        if len(chunk) + len(line) > 1900:  # güvenli sınır
+            await ctx.send(header + chunk)
+            chunk = ""
+        chunk += line
+
+    if chunk:
+        await ctx.send(header + chunk)
+
+
+@bot.command(name="kod-sil")
+@is_super_admin()
+async def kod_sil(ctx, *, kod: str):
+    """
+    Belirtilen tek bir kodu siler.
+    Örnek:
+    !kod-sil KOD123
+    """
+    data = load_data()
+    if kod not in data["codes"]:
+        await ctx.send("❌ Bu kod listede bulunamadı.")
+        return
+
+    # Sadece bu kodun geçtiği tüm yerleri sil (aynı kod birden fazla olabilir)
+    eski_sayi = len(data["codes"])
+    data["codes"] = [c for c in data["codes"] if c != kod]
+    yeni_sayi = len(data["codes"])
+    silinen = eski_sayi - yeni_sayi
+
+    save_data(data)
+    await ctx.send(f"🗑️ `{kod}` kodu listeden silindi (silinen adet: {silinen}).")
+
+
+@bot.command(name="kod-temizle")
+@is_super_admin()
+async def kod_temizle(ctx):
+    """
+    Tüm kodları siler.
+    """
+    data = load_data()
+    adet = len(data["codes"])
+    data["codes"] = []
+    save_data(data)
+    await ctx.send(f"🧹 Tüm kodlar silindi. (Silinen kod sayısı: {adet})")
+
+
+# --- NORMAL KULLANICI KOMUTLARI ---
 
 @bot.command(name="kod-al")
 async def kod_al(ctx):
