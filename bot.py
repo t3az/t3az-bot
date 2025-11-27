@@ -4,7 +4,7 @@ from discord.ext import commands
 import json
 from dotenv import load_dotenv
 
-load_dotenv()  # .env dosyasını yükle
+load_dotenv()
 
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 VERIFY_BASE_URL = os.environ["VERIFY_BASE_URL"]
@@ -16,7 +16,7 @@ bot = commands.Bot(command_prefix="!", intents=INTENTS)
 
 DATA_FILE = "data.json"
 
-# Sadece bu kullanıcılar "admin" komutlarını kullanabilsin
+# Admin yetkisi olan Discord ID'ler
 ALLOWED_ADMIN_IDS = {
     294866990110343168,
     324895490237923340,
@@ -24,26 +24,24 @@ ALLOWED_ADMIN_IDS = {
 
 
 def is_super_admin():
-    """Belirli ID'lere özel check."""
     async def predicate(ctx):
         if ctx.author.id in ALLOWED_ADMIN_IDS:
             return True
         await ctx.send("❌ Bu komutu kullanma yetkin yok.")
         return False
-
     return commands.check(predicate)
 
 
+# VERİ YÖNETİMİ ----------------------------------------------------------
+
 def load_data():
-    """data.json dosyasını her çağrıldığında diskteki SON halinden oku."""
     if not os.path.exists(DATA_FILE):
-        return {"users": {}, "codes": []}
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        try:
+        return {"users": {}, "codes": [], "banned": {}}
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-        except json.JSONDecodeError:
-            # dosya bozulursa sıfırla
-            return {"users": {}, "codes": []}
+    except:
+        return {"users": {}, "codes": [], "banned": {}}
 
 
 def save_data(data):
@@ -51,281 +49,267 @@ def save_data(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def is_verified(discord_id: int) -> bool:
-    """Kullanıcı verified mı her seferinde dosyadan kontrol et."""
-    data = load_data()
-    user = data["users"].get(str(discord_id))
-    return bool(user and user.get("verified"))
-
-
-def get_or_assign_code(discord_id: int) -> str | None:
-    """Kullanıcıya kod ver (daha önce aldıysa aynı kodu ver)."""
-    data = load_data()
-    uid = str(discord_id)
-
-    if uid not in data["users"]:
-        data["users"][uid] = {}
-
-    # Daha önce kod aldıysa aynı kodu ver
-    if "code" in data["users"][uid]:
-        return data["users"][uid]["code"]
-
-    # Yeni kod ver
-    if not data["codes"]:
-        return None  # Kod kalmadı
-
-    code = data["codes"].pop(0)
-    data["users"][uid]["code"] = code
-    save_data(data)
-    return code
-
+# LOG SİSTEMİ ------------------------------------------------------------
 
 async def log_action(message: str):
-    """İşlemleri log kanalına yazar."""
     if LOG_CHANNEL_ID == 0:
         return
     channel = bot.get_channel(LOG_CHANNEL_ID)
-    if channel is None:
-        return
-    try:
-        await channel.send(message)
-    except:
-        pass
+    if channel:
+        try:
+            await channel.send(message)
+        except:
+            pass
 
+
+# BOT HAZIR ---------------------------------------------------------------
 
 @bot.event
 async def on_ready():
     print(f"Bot olarak giriş yapıldı: {bot.user}")
 
 
-# --- ADMIN KOMUTLARI (Sadece ALLOWED_ADMIN_IDS kullanabilir) ---
+# ADMIN KOMUTLARI ---------------------------------------------------------
 
 @bot.command(name="kod-ekle")
 @is_super_admin()
 async def kod_ekle(ctx, *, kodlar: str):
-    """
-    Örnek:
-    !kod-ekle KOD1 KOD2 KOD3
-    """
     data = load_data()
     yeni = kodlar.split()
     data["codes"].extend(yeni)
     save_data(data)
-    await ctx.send(f"✅ {len(yeni)} kod eklendi. Toplam kalan kod: {len(data['codes'])}")
-    await log_action(f"🟢 {ctx.author.mention} {len(yeni)} adet kod ekledi. Toplam: {len(data['codes'])}")
+    await ctx.send(f"✅ {len(yeni)} kod eklendi.")
+    await log_action(f"🟢 {ctx.author.mention} {len(yeni)} kod ekledi.")
 
 
 @bot.command(name="kod-say")
 @is_super_admin()
 async def kod_say(ctx):
     data = load_data()
-    await ctx.send(f"📦 Kalan kod sayısı: {len(data['codes'])}")
-    await log_action(f"ℹ️ {ctx.author.mention} kalan kod sayısını sorguladı: {len(data['codes'])}")
+    await ctx.send(f"📦 Kalan kod: {len(data['codes'])}")
 
 
 @bot.command(name="kod-liste")
 @is_super_admin()
 async def kod_liste(ctx):
-    """
-    Tüm mevcut kodları listeler.
-    """
     data = load_data()
     codes = data["codes"]
-
     if not codes:
-        await ctx.send("📭 Kayıtlı kod yok.")
+        await ctx.send("📭 Kod yok.")
         return
 
-    # Mesaj limiti için parçalı gönder (2000 karakter sınırı)
+    # Limit aşmaması için parça parça gönder
     chunk = ""
-    header = "📃 Mevcut kodlar:\n"
     for code in codes:
         line = f"- {code}\n"
-        if len(chunk) + len(line) > 1900:  # güvenli sınır
-            await ctx.send(header + chunk)
+        if len(chunk) + len(line) > 1900:
+            await ctx.send(chunk)
             chunk = ""
         chunk += line
 
     if chunk:
-        await ctx.send(header + chunk)
-
-    await log_action(f"📃 {ctx.author.mention} mevcut kod listesini görüntüledi. Toplam: {len(codes)}")
+        await ctx.send(chunk)
 
 
 @bot.command(name="kod-sil")
 @is_super_admin()
 async def kod_sil(ctx, *, kod: str):
-    """
-    Belirtilen tek bir kodu siler.
-    Örnek:
-    !kod-sil KOD123
-    """
     data = load_data()
     if kod not in data["codes"]:
-        await ctx.send("❌ Bu kod listede bulunamadı.")
+        await ctx.send("❌ Kod bulunamadı.")
         return
 
-    # Sadece bu kodun geçtiği tüm yerleri sil (aynı kod birden fazla olabilir)
-    eski_sayi = len(data["codes"])
     data["codes"] = [c for c in data["codes"] if c != kod]
-    yeni_sayi = len(data["codes"])
-    silinen = eski_sayi - yeni_sayi
-
     save_data(data)
-    await ctx.send(f"🗑️ `{kod}` kodu listeden silindi (silinen adet: {silinen}).")
-    await log_action(f"🗑️ {ctx.author.mention} `{kod}` kodunu sildi. Silinen adet: {silinen}.")
+    await ctx.send(f"🗑️ `{kod}` silindi.")
 
 
 @bot.command(name="kod-temizle")
 @is_super_admin()
 async def kod_temizle(ctx):
-    """
-    Tüm kodları siler.
-    """
     data = load_data()
     adet = len(data["codes"])
     data["codes"] = []
     save_data(data)
-    await ctx.send(f"🧹 Tüm kodlar silindi. (Silinen kod sayısı: {adet})")
-    await log_action(f"🧹 {ctx.author.mention} tüm kodları temizledi. Silinen: {adet}.")
+    await ctx.send(f"🧹 Tüm kodlar silindi ({adet}).")
 
+
+# ------------------------- 💀 BAN SİSTEMİ ------------------------------------
 
 @bot.command(name="ban")
 @is_super_admin()
 async def ban_user(ctx, member: discord.Member = None):
-    """
-    Kullanıcıyı sunucudan atmadan tüm kanalları göremeyecek hale getirir.
-    Kullanım: !ban @kullanıcı
-    """
     if member is None:
-        await ctx.send("❌ Lütfen bir kullanıcı etiketle: `!ban @kullanıcı`")
+        await ctx.send("❌ Kullanıcı etiketle: `!ban @kullanıcı`")
         return
 
     guild = ctx.guild
-    ban_role_name = "Banned"
+    data = load_data()
 
-    # Rol var mı kontrol et
-    ban_role = discord.utils.get(guild.roles, name=ban_role_name)
+    # 1) Kullanıcının eski rollerini kaydet
+    old_roles = [role.id for role in member.roles if role != guild.default_role]
+    data["banned"][str(member.id)] = old_roles
+    save_data(data)
 
-    # Rol yoksa oluştur
+    # 2) Tüm rollerini kaldır
+    roles_to_remove = [r for r in member.roles if r != guild.default_role]
+    try:
+        await member.remove_roles(*roles_to_remove, reason="Ban sistemi: roller alındı")
+    except Exception as e:
+        await ctx.send(f"❌ Roller alınamadı: {e}")
+        return
+
+    # 3) Banned rolü oluştur veya al
+    ban_role = discord.utils.get(guild.roles, name="Banned")
     if ban_role is None:
         ban_role = await guild.create_role(
-            name=ban_role_name,
+            name="Banned",
             color=discord.Color.dark_gray(),
-            reason="Ban rolü otomatik oluşturuldu"
+            reason="Ban rolü oluşturuldu"
         )
 
-        # Tüm kanallar için görüntüleme iznini kapat
-        for channel in guild.channels:
-            await channel.set_permissions(ban_role, view_channel=False)
+    # 4) Ban rolünü tüm sunucuya uygula
+    for channel in guild.channels:
+        try:
+            await channel.set_permissions(
+                ban_role,
+                view_channel=False,
+                send_messages=False,
+                read_message_history=False
+            )
+        except:
+            pass
 
-    # Kullanıcıya rol ver
+    # 5) Kullanıcının özel izinlerini sıfırla
+    for channel in guild.channels:
+        try:
+            await channel.set_permissions(member, overwrite=None)
+        except:
+            pass
+
+    # 6) Kullanıcıya banned rolü ver
     await member.add_roles(ban_role)
-    await ctx.send(f"🚫 {member.mention} artık tüm kanalları göremeyecek şekilde banlandı.")
-    await log_action(f"🚫 {ctx.author.mention}, {member.mention} kullanıcısını görünmez banladı.")
 
+    await ctx.send(f"🚫 {member.mention} tamamen banlandı.\n"
+                   f"- Tüm roller alındı\n"
+                   f"- Tüm kanallar gizlendi\n"
+                   f"- Mesaj yazamaz\n"
+                   f"- Özel izinleri silindi\n")
+
+    await log_action(f"🚫 {ctx.author.mention}, {member.mention} kullanıcısını banladı.")
+
+
+# ------------------------- 🔓 UNBAN SİSTEMİ ------------------------------------
 
 @bot.command(name="unban")
 @is_super_admin()
 async def unban_user(ctx, member: discord.Member = None):
-    """
-    Kullanıcıdan Banned rolünü kaldırır.
-    Kullanım: !unban @kullanıcı
-    """
     if member is None:
-        await ctx.send("❌ Lütfen bir kullanıcı etiketle: `!unban @kullanıcı`")
+        await ctx.send("❌ Kullanıcı etiketle: `!unban @kullanıcı`")
         return
 
     guild = ctx.guild
-    ban_role_name = "Banned"
-    ban_role = discord.utils.get(guild.roles, name=ban_role_name)
+    data = load_data()
+    ban_role = discord.utils.get(guild.roles, name="Banned")
 
-    if ban_role is None:
-        await ctx.send("❌ 'Banned' isimli bir rol bulunamadı.")
-        return
+    # 1) Banned rolünü kaldır
+    if ban_role in member.roles:
+        await member.remove_roles(ban_role)
 
-    if ban_role not in member.roles:
-        await ctx.send("ℹ️ Bu kullanıcıda zaten 'Banned' rolü bulunmuyor.")
-        return
+    # 2) Özel izinlerini sıfırla
+    for channel in guild.channels:
+        try:
+            await channel.set_permissions(member, overwrite=None)
+        except:
+            pass
 
-    await member.remove_roles(ban_role)
-    await ctx.send(f"✅ {member.mention} için ban kaldırıldı, kanalları tekrar görebilecek.")
+    # 3) Eski rollerini geri yükle
+    old_roles_ids = data["banned"].get(str(member.id), [])
+    roles_to_give = []
+    for role_id in old_roles_ids:
+        role = guild.get_role(role_id)
+        if role:
+            roles_to_give.append(role)
+
+    if roles_to_give:
+        await member.add_roles(*roles_to_give)
+
+    # 4) Kaydı sil
+    if str(member.id) in data["banned"]:
+        del data["banned"][str(member.id)]
+        save_data(data)
+
+    await ctx.send(f"✅ {member.mention} banı kaldırıldı ve eski roller geri verildi.")
     await log_action(f"✅ {ctx.author.mention}, {member.mention} kullanıcısının banını kaldırdı.")
 
 
-# --- NORMAL KULLANICI KOMUTLARI ---
+# ------------------------- NORMAL KOMUTLAR ------------------------------------
 
 @bot.command(name="kod-al")
 async def kod_al(ctx):
     user_id = ctx.author.id
 
-    # Her çağrıda dosyanın son haline göre kontrol ediyor
     if not is_verified(user_id):
         verify_link = f"{VERIFY_BASE_URL}?discord_id={user_id}"
         try:
             await ctx.author.send(
                 "👋 Kod almak için önce abone olup https://www.youtube.com/@t3az doğrulama yapmalısın.\n"
-                f"Doğrulama linkin:\n{verify_link}\n\n"
-                "Doğruladıktan sonra tekrar `!kod-al` yaz."
+                f"Doğrulama linkin:\n{verify_link}"
             )
             await ctx.reply("DM'den doğrulama linki gönderdim 📩")
         except:
-            await ctx.reply("❌ DM'lerin kapalı. Aç ve tekrar `!kod-al` yaz.")
+            await ctx.reply("❌ DM'lerin kapalı, aç ve tekrar yaz.")
         return
 
     code = get_or_assign_code(user_id)
     if code is None:
-        await ctx.reply("❌ Kod kalmamış. Admin ekleyene kadar bekle.")
+        await ctx.reply("❌ Kod kalmamış.")
         return
 
     try:
         await ctx.author.send(f"🎁 Kodun: `{code}`")
-        await ctx.reply("Kodunu DM'den gönderdim! 🎉")
     except:
-        await ctx.reply(f"🎁 Kodun: `{code}` (DM kapalı olduğu için buraya yazıyorum)")
+        await ctx.reply(f"🎁 Kodun: `{code}` (DM kapalı)")
 
-    await log_action(f"🎁 {ctx.author.mention} bir kod aldı: `{code}`")
+    await ctx.reply("Kod gönderildi 🎉")
+    await log_action(f"🎁 {ctx.author.mention} kod aldı: `{code}`")
 
 
 @bot.command(name="kod-durum")
 async def kod_durum(ctx):
-    """Kullanıcının doğrulama ve kod durumunu gösterir."""
     user_id = ctx.author.id
     data = load_data()
-    uid = str(user_id)
-    user = data["users"].get(uid)
+    user = data["users"].get(str(user_id))
 
-    verified_emoji = "✅" if is_verified(user_id) else "❌"
-    msg = f"👤 {ctx.author.mention}\n"
-    msg += f"• Doğrulama durumu: {verified_emoji}\n"
+    verified = "✅ Doğrulanmış" if is_verified(user_id) else "❌ Doğrulanmamış"
+
+    msg = f"👤 {ctx.author.mention}\n• Doğrulama: {verified}\n"
 
     if user and "code" in user:
-        msg += f"• Kod durumun: ✅ Kodun: `{user['code']}`\n"
+        msg += f"• Kodun: `{user['code']}`"
     else:
-        msg += "• Kod durumun: ❌ Henüz kod almamışsın. `!kod-al` yazabilirsin.\n"
+        msg += "• Kodun yok."
 
     await ctx.send(msg)
 
 
 @bot.command(name="yardim")
 async def yardim(ctx):
-    """Komut listesini gösterir."""
     text = (
         "📚 **Komutlar:**\n"
         "\n"
         "__Kullanıcı Komutları:__\n"
-        "`!kod-al` → Doğrulama yaptıysan sana bir kod gönderir.\n"
-        "`!kod-durum` → Doğrulama ve kod durumunu gösterir.\n"
-        "`!yardim` → Bu mesajı gösterir.\n"
+        "`!kod-al` → Kod alırsın\n"
+        "`!kod-durum` → Kod durumunu gösterir\n"
         "\n"
-        "__Admin Komutları (sadece yetkili ID'ler):__\n"
-        "`!kod-ekle <kod1 kod2 ...>` → Yeni kodlar ekler.\n"
-        "`!kod-say` → Kalan kod sayısını gösterir.\n"
-        "`!kod-liste` → Kalan tüm kodları listeler.\n"
-        "`!kod-sil <kod>` → Belirtilen kodu listeden siler.\n"
-        "`!kod-temizle` → Tüm kodları sıfırlar.\n"
-        "`!ban @kullanıcı` → Kullanıcıyı tüm kanalları göremeyecek hale getirir.\n"
-        "`!unban @kullanıcı` → Kullanıcıdan 'Banned' rolünü kaldırır.\n"
+        "__Admin Komutları:__\n"
+        "`!kod-ekle <kodlar>`\n"
+        "`!kod-say`\n"
+        "`!kod-liste`\n"
+        "`!kod-sil <kod>`\n"
+        "`!kod-temizle`\n"
+        "`!ban @kullanıcı` → Tüm roller alınır, gizli ban\n"
+        "`!unban @kullanıcı` → Roller geri verilir\n"
     )
     await ctx.send(text)
 
