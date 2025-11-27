@@ -17,10 +17,15 @@ DATA_FILE = "data.json"
 
 
 def load_data():
+    """data.json dosyasını her çağrıldığında diskteki SON halinden oku."""
     if not os.path.exists(DATA_FILE):
         return {"users": {}, "codes": []}
     with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            # dosya bozulursa sıfırla
+            return {"users": {}, "codes": []}
 
 
 def save_data(data):
@@ -28,23 +33,16 @@ def save_data(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-data = load_data()
-
-
 def is_verified(discord_id: int) -> bool:
+    """Kullanıcı verified mı her seferinde dosyadan kontrol et."""
+    data = load_data()
     user = data["users"].get(str(discord_id))
     return bool(user and user.get("verified"))
 
 
-def set_verified(discord_id: int):
-    uid = str(discord_id)
-    if uid not in data["users"]:
-        data["users"][uid] = {}
-    data["users"][uid]["verified"] = True
-    save_data(data)
-
-
 def get_or_assign_code(discord_id: int) -> str | None:
+    """Kullanıcıya kod ver (daha önce aldıysa aynı kodu ver)."""
+    data = load_data()
     uid = str(discord_id)
 
     if uid not in data["users"]:
@@ -72,7 +70,7 @@ async def on_ready():
 @bot.command(name="kod-ekle")
 @commands.has_permissions(administrator=True)
 async def kod_ekle(ctx, *, kodlar: str):
-    global data
+    data = load_data()
     yeni = kodlar.split()
     data["codes"].extend(yeni)
     save_data(data)
@@ -82,6 +80,7 @@ async def kod_ekle(ctx, *, kodlar: str):
 @bot.command(name="kod-say")
 @commands.has_permissions(administrator=True)
 async def kod_say(ctx):
+    data = load_data()
     await ctx.send(f"📦 Kalan kod sayısı: {len(data['codes'])}")
 
 
@@ -89,6 +88,7 @@ async def kod_say(ctx):
 async def kod_al(ctx):
     user_id = ctx.author.id
 
+    # Her çağrıda dosyanın son haline göre kontrol ediyor
     if not is_verified(user_id):
         verify_link = f"{VERIFY_BASE_URL}?discord_id={user_id}"
         try:
